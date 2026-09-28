@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Bookmark Collector
 // @namespace    https://github.com/t32504m/bookmark_sorting
-// @version      0.1.0
+// @version      0.3.0
 // @description  ブックマーク画面の Bookmarks 応答を複製して記録する(要件定義書 4.1)
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -31,13 +31,18 @@
   // 未検証: 操作名と URL の形は TWE のソースからの推測(/i/api/graphql/<hash>/Bookmarks?variables=...)
   const BOOKMARKS_RE = /\/graphql\/[^/?]+\/Bookmarks(?:\?|$)/;
   const STOP_AFTER_MS = 30000; // 投稿を含む応答がこの時間届かなければ自動停止
+  const RETRY_JUMP_MS = 5000; // 一番下へ移動しても応答が来なければ、この間隔でもう一度移動する
+  const BURST_COUNT = 3; // 1回の移動で End キーを押す回数
+  const BURST_GAP_MS = 300; // 押す間隔(3回で1秒未満)
   const DB_NAME = 'xbm_collector';
 
   const state = {
     graphqlSeen: 0, // 観測した graphql の XHR 数(横取りが効いているかの目安)
     bookmarksSeen: 0,
     running: false,
-    timer: null,
+    timer: null, // 次に一番下へ移動する予約
+    watcher: null, // 停止条件と再移動を1秒ごとに見る
+    lastJumpAt: 0,
     lastTweetsAt: 0,
     lastPost: null, // { created_at, head }
     lastError: '',
@@ -183,6 +188,7 @@
       state.lastTweetsAt = Date.now();
       const last = posts[posts.length - 1];
       state.lastPost = { created_at: last.created_at, head: last.head };
+      if (state.running) scheduleJump();
     }
     if (xhr.status !== 200) {
       state.lastError = `HTTP ${xhr.status}`;
@@ -226,13 +232,15 @@
     state.lastTweetsAt = Date.now();
     state.lastError = '';
     state.session = { started_at: new Date(), stopped_at: null, reason: '', ids: new Set(), responses: 0 };
-    tick();
+    jumpToBottom();
+    state.watcher = setInterval(watch, 1000);
     render();
   }
 
   function stop(reason) {
     state.running = false;
     clearTimeout(state.timer);
+    clearInterval(state.watcher);
     if (state.session && !state.session.stopped_at) {
       state.session.stopped_at = new Date();
       state.session.reason = reason;
@@ -240,15 +248,34 @@
     render();
   }
 
-  function tick() {
+  // End キーを1秒未満に3回押すのと同じく、一番下へ移動して次の読み込みを促す。
+  // 1回だけでは、描画が追いつく前に移動して読み込みが始まらないことがあった(利用者の実機)
+  function jumpToBottom() {
+    state.lastJumpAt = Date.now();
+    for (let i = 0; i < BURST_COUNT; i++) {
+      setTimeout(() => {
+        if (state.running) W.scrollTo(0, document.documentElement.scrollHeight);
+      }, i * BURST_GAP_MS);
+    }
+  }
+
+  // 投稿を含む応答が届いたら、1〜3秒おいてから一番下へ移動する
+  function scheduleJump() {
+    clearTimeout(state.timer);
+    state.lastJumpAt = Date.now(); // 予約した移動より先に、5秒ごとの再移動が走らないようにする
+    state.timer = setTimeout(() => {
+      if (state.running) jumpToBottom();
+    }, 1000 + Math.random() * 2000);
+  }
+
+  function watch() {
     if (!state.running) return;
     if (!isBookmarksPage()) return stop('ブックマーク画面を離れた');
     if (Date.now() - state.lastTweetsAt > STOP_AFTER_MS) {
       return stop('それ以上読み込まれなくなった(30秒間、投稿を含む応答なし)');
     }
-    W.scrollBy(0, Math.round(W.innerHeight * 0.8));
-    state.timer = setTimeout(tick, 1000 + Math.random() * 2000); // 1〜3秒
-    render();
+    // 移動しても読み込みが始まらなかった場合に備え、5秒ごとにもう一度移動する
+    if (Date.now() - state.lastJumpAt > RETRY_JUMP_MS) jumpToBottom();
   }
 
   /* ---------------- 書き出し ---------------- */
