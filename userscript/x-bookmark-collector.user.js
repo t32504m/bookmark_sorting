@@ -224,7 +224,7 @@
   /* ---------------- 自動スクロール ---------------- */
 
   function isBookmarksPage() {
-    return location.pathname.startsWith('/i/bookmarks');
+    return location.pathname.startsWith('/i/history');
   }
 
   function start() {
